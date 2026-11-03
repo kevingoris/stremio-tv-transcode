@@ -24,4 +24,4 @@ In the Android TV app, before playing:
 
 **Working proof of concept**
 
-https://github.com/kevingoris/stremio-tv-transcode — a small module (`tv-transcode.js`) plus a hook in `server.js` that does it on the server side: it probes the file, and if the codec isn't supported it serves H.264 + AAC as a constant-bitrate MPEG-TS (so Range/seeking keeps working), with burned-in subtitles. It works with the current Android TV app without changes, but the right fix belongs in the app.
+https://github.com/kevingoris/stremio-tv-transcode — a small module (`tv-transcode.js`) plus a hook in `server.js` that does it on the server side: it probes the file, and if the codec isn't supported it serves H.264 + AAC as a constant-bitrate MPEG-TS (so Range/seeking keeps working), and it exposes the file's embedded subtitles through a small local subtitles addon, since MPEG-TS can't carry them. It works with the current Android TV app without changes, but the right fix belongs in the app.

@@ -9,9 +9,6 @@
   "maxAudioTracks": 4,
   "muxrate": 3000000,
   "x264Preset": "veryfast",
-  "burnSubtitles": ["spa"],
-  "preferSubtitleTitle": "latin|lat\\b|419|latam",
-  "subtitlesWaitMs": 6000,
   "clients": [],
   "serverPort": 11470
 }

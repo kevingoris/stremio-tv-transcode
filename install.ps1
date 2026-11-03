@@ -25,8 +25,16 @@ $hook = @"
 $begin if (!req.__tvChecked) { req.__tvChecked = !0; var tvTranscode = null; try { tvTranscode = require(path.join(path.dirname(process.execPath), "tv-transcode.js")); } catch (ex) { console.error("tv-transcode:", ex); } if (tvTranscode) return tvTranscode.maybeHandle(req, res, e, e.files.indexOf(handle), handle.name, (function(handled) { handled || handleTorrent(req, res, next); })); } $end
 "@
 
+# Second hook: the /tv-transcode/ routes (subtitles addon), in createApp,
+# before the server's own routers.
+$rBegin = "/* tv-transcode:routes-begin */"
+$rEnd = "/* tv-transcode:routes-end */"
+$rAnchor = 'app.use(externalRouter), app.use(router), app;'
+$rHook = "$rBegin app.use((function(req, res, next) { var t = null; try { t = require(path.join(path.dirname(process.execPath), `"tv-transcode.js`")); } catch (ex) {} t && t.handleRoute ? t.handleRoute(req, res, next) : next(); })), $rEnd "
+
 $pattern = [regex]::Escape($begin) + ".*?" + [regex]::Escape($end) + "\r?\n?\s*"
 $clean = [regex]::Replace($code, $pattern, "", "Singleline")
+$clean = [regex]::Replace($clean, [regex]::Escape($rBegin) + ".*?" + [regex]::Escape($rEnd) + " ?", "", "Singleline")
 
 if ($Uninstall) {
     [IO.File]::WriteAllText($serverJs, $clean, $utf8)
@@ -38,9 +46,28 @@ if ($Uninstall) {
     $backup = Join-Path $StremioDir "server.js.bak-tvtranscode"
     if (-not (Test-Path $backup)) { [IO.File]::WriteAllText($backup, $clean, $utf8) }
     $patched = $clean.Insert($i, $hook.Trim() + "`n            ")
+    $j = $patched.IndexOf($rAnchor)
+    if ($j -lt 0) { Write-Warning "createApp changed: the subtitles addon (/tv-transcode/) won't be available. Conversion still works." }
+    else { $patched = $patched.Insert($j, $rHook) }
     [IO.File]::WriteAllText($serverJs, $patched, $utf8)
     Copy-Item (Join-Path $PSScriptRoot "tv-transcode.js") $StremioDir -Force
     Write-Host "Installed. Original server.js backup: $backup"
+}
+
+if (-not $Uninstall) {
+    # Link of the subtitles addon. It has to be the same HTTPS address the TV
+    # uses for the server (the one Stremio sets up in "HTTPS endpoint").
+    $certFile = Join-Path $env:APPDATA "stremio\stremio-server\httpsCert.json"
+    $domain = $null
+    try { $domain = (Get-Content $certFile -Raw | ConvertFrom-Json).domain } catch {}
+    Write-Host ""
+    if ($domain) {
+        Write-Host "Subtitles addon (paste it into Stremio's addon search box, once):"
+        Write-Host "  https://$domain`:12470/tv-transcode/manifest.json" -ForegroundColor Cyan
+    } else {
+        Write-Host "To get the subtitles addon link, first turn on Stremio > Settings > Streaming > 'HTTPS endpoint'"
+        Write-Host "(pick the PC's IP), then run this installer again."
+    }
 }
 
 if (-not $NoRestart) {

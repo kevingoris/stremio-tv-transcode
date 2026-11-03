@@ -9,8 +9,9 @@
 // This module is loaded from a small hook in server.js (handleTorrent). When a
 // device on the LAN (not the PC itself) requests a video that the TV can't
 // decode, the server converts it on the fly to H.264 + AAC, which every TV
-// supports, and can burn subtitles into the picture. Anything the TV can
-// play is sent untouched, as before.
+// supports. Anything the TV can play is sent untouched, as before. The file's
+// subtitles reach Stremio through a small addon (see further down), so you
+// still pick them, and their timing, in Stremio.
 //
 // The output is a constant-bitrate MPEG-TS (fixed muxrate): every byte maps to
 // an exact moment in the video, so the player's "Range" requests (seeking,
@@ -45,10 +46,6 @@ const DEFAULTS = {
     maxAudioTracks: 4,
     muxrate: 3000000,         // bits/s, must be above video + all audio tracks
     x264Preset: "veryfast",
-    // Subtitles burned into the picture (an empty array means none)
-    burnSubtitles: [ "spa" ], // ISO 639-2 language codes, in order of preference
-    preferSubtitleTitle: "latin|lat\\b|419|latam",
-    subtitlesWaitMs: 6000,
     // Only these devices (IPs) get conversion. An empty array means every device on the LAN.
     clients: [],
     // Local server port (ffmpeg reads the original file through it)
@@ -68,7 +65,6 @@ const VIDEO_EXT = /\.(mkv|mp4|m4v|webm|avi|mov|ts)$/i;
 const TEXT_SUBS = [ "ass", "ssa", "subrip", "srt", "webvtt", "mov_text" ];
 
 const probes = {};   // key -> Promise<info|null>
-const subJobs = {};  // key -> { done, file, promise }
 const sessions = {}; // key -> Set<session>
 
 try { fs.mkdirSync(WORK_DIR, { recursive: true }); } catch (e) {}
@@ -95,20 +91,6 @@ function needsTranscode(v) {
     return false;
 }
 
-function pickSubtitle(subs) {
-    const lang = (s) => ((s.tags && s.tags.language) || "").toLowerCase();
-    const title = (s) => ((s.tags && s.tags.title) || "");
-    const prefer = config.preferSubtitleTitle ? new RegExp(config.preferSubtitleTitle, "i") : null;
-    for (const l of config.burnSubtitles || []) {
-        const ofLang = subs.filter((s) => lang(s) === l);
-        const pick = (prefer && ofLang.find((s) => prefer.test(title(s))))
-            || ofLang.find((s) => !/forced|signs/i.test(title(s)))
-            || ofLang[0];
-        if (pick) return pick;
-    }
-    return null;
-}
-
 function probe(key, inputUrl) {
     if (probes[key]) return probes[key];
     probes[key] = new Promise((resolve) => {
@@ -123,53 +105,14 @@ function probe(key, inputUrl) {
                 const audio = streams.filter((s) => s.codec_type === "audio");
                 const subs = streams.filter((s) => s.codec_type === "subtitle" && TEXT_SUBS.includes(s.codec_name));
                 const duration = parseFloat(j.format && j.format.duration) || 0;
-                const sub = pickSubtitle(subs);
-                const info = { needs: needsTranscode(video) && duration > 0, video, audio: audio.slice(0, config.maxAudioTracks), sub, duration };
+                const info = { needs: needsTranscode(video) && duration > 0, video, audio: audio.slice(0, config.maxAudioTracks), subs, duration };
                 log("probe " + key + ": " + (video ? video.codec_name + " " + video.pix_fmt + " " + video.width + "x" + video.height : "no video")
-                    + " dur=" + duration + " transcode=" + info.needs + " subs=" + (sub ? sub.index + " " + ((sub.tags && sub.tags.title) || "") : "none"));
+                    + " dur=" + duration + " transcode=" + info.needs + " subtitle tracks=" + subs.length);
                 resolve(info);
             } catch (e) { log("probe parse " + key + ": " + e.message); delete probes[key]; resolve(null); }
         });
     });
     return probes[key];
-}
-
-// Extracts the subtitle track to an .ass file. It has to read the whole file
-// (the torrent downloads much faster than it gets watched).
-function extractSubs(key, inputUrl, info) {
-    if (!info.sub) return null;
-    if (subJobs[key]) return subJobs[key];
-    const file = path.join(WORK_DIR, key.replace(/[^a-z0-9]/gi, "_") + ".ass");
-    const job = { done: false, file };
-    if (fs.existsSync(file)) { job.done = true; job.promise = Promise.resolve(true); return subJobs[key] = job; }
-    const tmp = file + ".tmp.ass";
-    job.promise = new Promise((resolve) => {
-        const p = spawn(FFMPEG, [ "-hide_banner", "-loglevel", "error", "-y", "-i", inputUrl,
-            "-map", "0:" + info.sub.index, "-c:s", "ass", tmp ], { windowsHide: true });
-        p.on("close", (code) => {
-            if (code === 0 && fs.existsSync(tmp)) {
-                try { fs.renameSync(tmp, file); job.done = true; } catch (e) {}
-            }
-            log("subs " + key + (job.done ? " ready" : " failed (" + code + ")"));
-            resolve(job.done);
-            if (job.done) kickSessionsWithoutSubs(key);
-        });
-    });
-    return subJobs[key] = job;
-}
-
-// Once the subtitles are ready, drop the connections that were being served
-// without them: the player retries from the same position and the new
-// connection comes with subtitles.
-function kickSessionsWithoutSubs(key) {
-    (sessions[key] || new Set()).forEach((s) => {
-        if (!s.withSubs) { log("reconnecting session without subs " + key); s.kill(); try { s.res.destroy(); } catch (e) {} }
-    });
-}
-
-function subsFilterPath(file) {
-    // Escaped for ffmpeg's "subtitles" filter (on Windows: C\:/...).
-    return file.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
 }
 
 const NULL_PACKET = (() => {
@@ -178,7 +121,7 @@ const NULL_PACKET = (() => {
     return b;
 })();
 
-function serve(req, res, key, inputUrl, info, subFile) {
+function serve(req, res, key, inputUrl, info) {
     const total = Math.ceil(info.duration * BYTES_PER_SEC / TS_PACKET) * TS_PACKET;
     let start = 0, end = total - 1;
     const m = /bytes=(\d*)-(\d*)/.exec(req.headers.range || "");
@@ -204,9 +147,7 @@ function serve(req, res, key, inputUrl, info, subFile) {
     // Byte -> second (the TS is constant bitrate). Never so close to the end
     // that ffmpeg can't output a single frame.
     const t = Math.min(start / BYTES_PER_SEC, Math.max(0, info.duration - 3));
-    const vf = [ "scale='min(" + config.outputWidth + ",iw)':-2" ];
-    if (subFile) vf.push("subtitles='" + subsFilterPath(subFile) + "'");
-    vf.push("format=yuv420p");
+    const vf = [ "scale='min(" + config.outputWidth + ",iw)':-2", "format=yuv420p" ];
     const args = [ "-hide_banner", "-loglevel", "error", "-nostdin" ];
     if (t > 0.5) args.push("-ss", t.toFixed(3));
     args.push("-copyts", "-i", inputUrl, "-map", "0:" + info.video.index);
@@ -218,10 +159,9 @@ function serve(req, res, key, inputUrl, info, subFile) {
         "-f", "mpegts", "-muxrate", String(config.muxrate), "pipe:1");
 
     const ff = spawn(FFMPEG, args, { windowsHide: true });
-    const session = { res, withSubs: !!subFile, kill: () => { try { ff.kill("SIGKILL"); } catch (e) {} } };
+    const session = { kill: () => { try { ff.kill("SIGKILL"); } catch (e) {} } };
     (sessions[key] = sessions[key] || new Set()).add(session);
-    log("serving " + key + " from " + t.toFixed(1) + "s bytes " + start + "-" + end + (subFile ? " with subs" : " without subs")
-        + " to " + req.connection.remoteAddress);
+    log("serving " + key + " from " + t.toFixed(1) + "s bytes " + start + "-" + end + " to " + req.connection.remoteAddress);
 
     let sent = 0, finished = false, errText = "";
     ff.stderr.on("data", (d) => { if (errText.length < 2000) errText += d; });
@@ -261,6 +201,132 @@ function serve(req, res, key, inputUrl, info, subFile) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Subtitles addon
+//
+// The converted video is an MPEG-TS, which can't carry the file's text
+// subtitles, so the TV app would lose them. To keep Stremio showing them
+// separately (as usual, with its own menu and style), the server also works
+// as a small Stremio addon: for each converted file it offers all its embedded
+// text tracks, extracted to .srt.
+//
+//   https://<the address the TV uses for the server>/tv-transcode/manifest.json
+// ---------------------------------------------------------------------------
+
+const converted = {}; // key -> { engine, fileIdx, name, length, info, inputUrl, at }
+const allSubJobs = {}; // key -> Promise<bool>
+
+function remember(key, engine, fileIdx, fileName, info, inputUrl) {
+    const f = engine.files && engine.files[fileIdx];
+    converted[key] = { engine, fileIdx, name: fileName, length: f ? f.length : 0, info, inputUrl, at: Date.now() };
+}
+
+function subFile(key, streamIndex) {
+    return path.join(WORK_DIR, key.replace(/[^a-z0-9]/gi, "_") + "_" + streamIndex + ".srt");
+}
+
+// Extracts every text subtitle track to .srt in a single pass over the file.
+function extractAllSubs(key) {
+    const c = converted[key];
+    if (!c || !c.info.subs.length) return Promise.resolve(false);
+    if (allSubJobs[key]) return allSubJobs[key];
+    if (c.info.subs.every((s) => fs.existsSync(subFile(key, s.index)))) return allSubJobs[key] = Promise.resolve(true);
+    allSubJobs[key] = new Promise((resolve) => {
+        const args = [ "-hide_banner", "-loglevel", "error", "-y", "-i", c.inputUrl ];
+        c.info.subs.forEach((s) => args.push("-map", "0:" + s.index, "-c:s", "srt", subFile(key, s.index) + ".tmp.srt"));
+        const p = spawn(FFMPEG, args, { windowsHide: true });
+        p.on("close", (code) => {
+            c.info.subs.forEach((s) => { try { fs.renameSync(subFile(key, s.index) + ".tmp.srt", subFile(key, s.index)); } catch (e) {} });
+            log("all subs " + key + " " + (code === 0 ? "ready" : "failed (" + code + ")"));
+            if (code !== 0) delete allSubJobs[key];
+            resolve(code === 0);
+        });
+    });
+    return allSubJobs[key];
+}
+
+function sendJson(res, code, obj) {
+    const body = JSON.stringify(obj);
+    res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "max-age=0, no-cache" });
+    res.end(body);
+}
+
+function baseUrl(req) {
+    const secure = req.socket && req.socket.constructor && req.socket.constructor.name === "TLSSocket";
+    return (secure ? "https://" : "http://") + req.headers.host + "/tv-transcode";
+}
+
+// Which converted file is Stremio asking subtitles for? By size (Stremio
+// sends videoSize), then by name; otherwise the one being converted right now.
+function findConverted(extra) {
+    const list = Object.keys(converted).map((k) => Object.assign({ key: k }, converted[k]));
+    const size = parseInt(extra.videoSize, 10);
+    if (size) return list.find((c) => c.length === size) || null;
+    if (extra.filename) return list.find((c) => c.name === decodeURIComponent(extra.filename)) || null;
+    return list.filter((c) => (sessions[c.key] && sessions[c.key].size) || Date.now() - c.at < 60000)
+        .sort((a, b) => b.at - a.at)[0] || null;
+}
+
+const MANIFEST = {
+    id: "local.tv-transcode.subtitles",
+    version: "1.0.0",
+    name: "TV transcode subtitles",
+    description: "Embedded subtitles of the videos that Stremio Service converts for the TV (tv-transcode).",
+    resources: [ "subtitles" ],
+    types: [ "movie", "series", "anime", "other" ],
+    catalogs: []
+};
+
+// Routes under /tv-transcode/. Calls next() for anything else.
+function handleRoute(req, res, next) {
+    const u = (req.url || "").split("?")[0];
+    if (u.indexOf("/tv-transcode/") !== 0) return next();
+    if (req.method === "OPTIONS") {
+        res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*" });
+        return res.end();
+    }
+    const rest = u.slice("/tv-transcode/".length);
+    if (rest === "manifest.json") return sendJson(res, 200, MANIFEST);
+
+    let m = /^subtitles\/[^/]+\/[^/]+?(?:\/([^/]+))?\.json$/.exec(rest);
+    if (m) {
+        const extra = {};
+        (decodeURIComponent(m[1] || "")).split("&").forEach((kv) => { const i = kv.indexOf("="); if (i > 0) extra[kv.slice(0, i)] = kv.slice(i + 1); });
+        const c = findConverted(extra);
+        if (!c) return sendJson(res, 200, { subtitles: [] });
+        extractAllSubs(c.key);
+        const base = baseUrl(req);
+        const subtitles = c.info.subs.map((s) => ({
+            id: "tvt-" + c.key + "-" + s.index,
+            url: base + "/sub/" + c.key.replace("/", "-") + "-" + s.index + ".srt",
+            lang: (s.tags && s.tags.language) || "und"
+        }));
+        log("subtitles for " + c.key + ": " + subtitles.length + " tracks (extra " + JSON.stringify(extra) + ")");
+        return sendJson(res, 200, { subtitles, cacheMaxAge: 0 });
+    }
+
+    m = /^sub\/([0-9a-f]{40})-(\d+)-(\d+)\.srt$/i.exec(rest);
+    if (m) {
+        const key = m[1].toLowerCase() + "/" + m[2];
+        const file = subFile(key, m[3]);
+        const send = () => {
+            fs.readFile(file, (err, data) => {
+                if (err) { res.writeHead(404, { "Access-Control-Allow-Origin": "*" }); return res.end(); }
+                res.writeHead(200, { "Content-Type": "application/x-subrip; charset=utf-8", "Access-Control-Allow-Origin": "*" });
+                res.end(data);
+            });
+        };
+        if (fs.existsSync(file)) return send();
+        // Still extracting: wait (the torrent downloads fast).
+        const job = extractAllSubs(key);
+        const timer = setTimeout(send, 120000);
+        return job.then(() => { clearTimeout(timer); send(); });
+    }
+    res.writeHead(404, { "Access-Control-Allow-Origin": "*" });
+    res.end();
+}
+
 // Calls back with true if it handled the request, false if server.js should
 // send the original file as usual.
 function maybeHandle(req, res, engine, fileIdx, fileName, cb) {
@@ -278,19 +344,9 @@ function maybeHandle(req, res, engine, fileIdx, fileName, cb) {
     probe(key, inputUrl).then((info) => {
         if (!info || !info.needs) return cb(false);
         cb(true);
-        let closed = false;
-        res.on("close", () => { closed = true; });
-        const job = extractSubs(key, inputUrl, info);
-        if (!job || job.done) return serve(req, res, key, inputUrl, info, job && job.done ? job.file : null);
-        let served = false;
-        const go = () => {
-            if (served) return;
-            served = true;
-            if (!closed) serve(req, res, key, inputUrl, info, job.done ? job.file : null);
-        };
-        job.promise.then(go);
-        setTimeout(go, config.subtitlesWaitMs);
+        remember(key, engine, fileIdx, fileName, info, inputUrl);
+        serve(req, res, key, inputUrl, info);
     }).catch((e) => { log("error " + key + ": " + e.message); cb(false); });
 }
 
-module.exports = { maybeHandle };
+module.exports = { maybeHandle, handleRoute };

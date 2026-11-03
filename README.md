@@ -22,10 +22,11 @@ A small hook in `server.js` sends every video request from the local network to 
 2. If the TV **can** play it → it sends the original file, untouched, as before.
 3. If it **can't** → it converts it on the fly to **H.264 + AAC** (720p by default) and:
    - keeps all the audio tracks,
-   - **burns the subtitles into the picture** in the language you pick (Spanish by default),
    - serves it as a **constant-bitrate MPEG-TS**. Each byte maps to an exact moment, so **seeking and resuming keep working**: the player's `Range` requests are turned into an ffmpeg `-ss`.
 
 Requests from the PC itself (`127.0.0.1`) are never touched, so Stremio on the PC works as usual.
+
+**Subtitles:** the converted video can't carry the file's subtitles inside it, so the server also works as a small **Stremio subtitles addon**. For videos it's converting, it offers all the file's text subtitle tracks. They show up in Stremio's normal subtitle menu (as "TV transcode subtitles"), where you pick the language, the size and the delay, as with any other subtitle. Nothing gets burned into the picture. For videos that aren't converted it offers nothing, since those already bring their own subtitles.
 
 Tested with: Stremio Service on Windows 10 (Xeon E3-1505M, 4 cores), Stremio for Android TV on a TCL Android TV 9 (720p panel). An AV1 1080p 10-bit episode transcodes about **4x faster than real time** on the CPU (libx264 `veryfast`).
 
@@ -37,11 +38,20 @@ Tested with: Stremio Service on Windows 10 (Xeon E3-1505M, 4 cores), Stremio for
    powershell -ExecutionPolicy Bypass -File install.ps1
    ```
    It copies `tv-transcode.js` next to `server.js`, adds the hook (keeping `server.js.bak-tvtranscode` as a backup) and restarts Stremio Service.
-3. **After every Stremio Service update**, run it again: updates replace `server.js` and remove the hook.
+3. **Install the subtitles addon (once).** At the end, the installer prints a link like this:
+   ```
+   https://192-168-0-7.xxxxxxxxxxxx.stremio.rocks:12470/tv-transcode/manifest.json
+   ```
+   In Stremio (on the phone, PC or TV), **paste that link into the addon search box** and tap **Install**. Addons sync with your account, so the TV gets it too.
+   - You don't have to upload anything anywhere: the addon is served by your own Stremio Service. It only works while the PC is on, which is when you use it anyway.
+   - Stremio installs addons from a link, not by pasting the JSON.
+   - To check it before installing: open the link in the PC's browser. If you see a text with `"name":"TV transcode subtitles"`, the server is serving the addon.
+   - If the installer doesn't show the link, turn on Stremio → Settings → Streaming → **HTTPS endpoint** (choose the PC's IP) and run it again. It has to be the HTTPS address: it's the same one the TV uses to reach the server.
+4. **After every Stremio Service update**, run `install.ps1` again: updates replace `server.js` and remove the hook. The addon stays installed in Stremio; you don't need to install it again.
 
 Remove it: `install.ps1 -Uninstall`. Turn it off temporarily: create an empty file named `tv-transcode.off` in the Stremio Service folder.
 
-Other systems: the module also looks for `ffmpeg`/`ffprobe` in Linux paths, but the installer is Windows-only. To add the hook by hand, put the line that `install.ps1` inserts right before `EngineFS.emit("stream-open", ...)` inside `handleTorrent`.
+Other systems: the module also looks for `ffmpeg`/`ffprobe` in Linux paths, but the installer is Windows-only. To add the hooks by hand, copy the two lines that `install.ps1` inserts: one right before `EngineFS.emit("stream-open", ...)` inside `handleTorrent`, and the other (the addon routes) right before `app.use(externalRouter)` inside `createApp`.
 
 ## Set it up for your TV
 
@@ -92,8 +102,6 @@ All the keys in `tv-transcode.config.json`:
 | `maxWidth` / `maxHeight` | Maximum resolution your TV decodes. |
 | `outputWidth` | Output width (1280 = 720p, 1920 = 1080p, which uses more CPU). |
 | `videoBitrate`, `audioBitrate`, `muxrate` | Output quality. `muxrate` has to be above video + all audio tracks. |
-| `burnSubtitles` | Languages to burn in, in order of preference (`["spa"]`, `["eng"]`, `[]` for none). |
-| `preferSubtitleTitle` | Regex to prefer a track by title (e.g. Latin American Spanish). |
 
 Log: `%TEMP%\stremio-transcode\tv-transcode.log`.
 
@@ -101,7 +109,7 @@ Log: `%TEMP%\stremio-transcode\tv-transcode.log`.
 
 - The **PC does the work**: it needs enough CPU (or you can lower `outputWidth`/`x264Preset`).
 - Seeking takes a few seconds (ffmpeg starts again from that point).
-- Subtitles are burned into the picture, so you can't switch them from the TV. Text subtitles only (ASS/SRT), not image ones (PGS).
+- Subtitles reach Stremio through the addon, as plain text (`.srt`): ASS styling (colors, positions, signs) is lost. Image subtitles (PGS) aren't offered. The first time you pick a subtitle it can take a few seconds, because it has to read the whole file.
 - It isn't official: it depends on the internal structure of `server.js`, which can change between versions.
 
 ## For the Stremio team 💡
@@ -124,8 +132,9 @@ Stremio Service siempre le manda a la TV el **archivo original**. Muchas Android
 ### Qué hace
 Cuando la TV pide un video, el server lo analiza. Si la TV lo puede reproducir, se lo manda tal cual. Si no, lo convierte en el momento a **H.264 + AAC** (720p por defecto):
 - conserva todos los audios,
-- **quema los subtítulos** en tu idioma (español por defecto, prefiere latino),
 - se puede **adelantar, retroceder y retomar** donde lo dejaste.
+
+**Subtítulos:** el video convertido no puede llevar adentro los subtítulos del archivo, así que el server además funciona como un pequeño **addon de subtítulos de Stremio**. Los subtítulos del archivo aparecen en el menú normal de Stremio (como "TV transcode subtitles"), donde elegís el idioma, el tamaño y el desfase como con cualquier otro. No se quema nada en la imagen. Con los videos que no se convierten, el addon no ofrece nada, porque esos ya traen sus subtítulos.
 
 ### Instalar (Windows)
 1. Descargá el repo (Code → Download ZIP) y descomprimilo.
@@ -133,7 +142,16 @@ Cuando la TV pide un video, el server lo analiza. Si la TV lo puede reproducir, 
    ```powershell
    powershell -ExecutionPolicy Bypass -File install.ps1
    ```
-3. **Después de cada actualización de Stremio Service**, volvé a ejecutarlo.
+3. **Instalá el addon de subtítulos (una sola vez).** Al terminar, el instalador te muestra un link así:
+   ```
+   https://192-168-0-7.xxxxxxxxxxxx.stremio.rocks:12470/tv-transcode/manifest.json
+   ```
+   En Stremio (en el celular, la PC o la TV), **pegá ese link en el buscador de addons** y tocá **Instalar**. Los addons se sincronizan con tu cuenta, así que le llega también a la TV.
+   - No hace falta subir nada a ningún lado: el addon lo sirve tu propio Stremio Service, así que solo funciona con la PC prendida, que es justo cuando lo usás.
+   - Stremio instala los addons con un link, no pegando el JSON.
+   - Para chequearlo antes de instalarlo: abrí el link en el navegador de la PC. Si ves un texto con `"name":"TV transcode subtitles"`, el server está sirviendo el addon.
+   - Si el instalador no te muestra el link, activá en Stremio → Configuración → Streaming → **HTTPS endpoint** (elegí la IP de la PC) y volvé a ejecutarlo. Tiene que ser la dirección HTTPS, que es la misma que usa la TV para conectarse al server.
+4. **Después de cada actualización de Stremio Service**, volvé a ejecutar `install.ps1`. El addon queda instalado en Stremio, no hay que volver a agregarlo.
 
 Para sacarlo: `install.ps1 -Uninstall`. Para apagarlo un rato: creá un archivo vacío llamado `tv-transcode.off` en la carpeta de Stremio Service.
 
@@ -152,14 +170,14 @@ Para sacarlo: `install.ps1 -Uninstall`. Para apagarlo un rato: creá un archivo 
 5. El script lee la lista de decodificadores de la TV, se queda **solo con los de hardware**, te muestra lo que encontró y guarda `tv-transcode.config.json`. Con `-OnlyThisTv`, solo esa TV recibe la conversión; el celular y los demás dispositivos reciben el archivo original. Con `-DryRun` te lo muestra sin guardar nada.
 6. Reiniciá Stremio Service.
 
-**A mano:** buscá qué chip tiene tu TV y qué formatos soporta, copiá `tv-transcode.config.example.json` a la carpeta de Stremio Service como `tv-transcode.config.json` y editalo (la tabla de arriba, en inglés, explica cada opción). Por ejemplo, `"burnSubtitles": ["eng"]` quema los subtítulos en inglés.
+**A mano:** buscá qué chip tiene tu TV y qué formatos soporta, copiá `tv-transcode.config.example.json` a la carpeta de Stremio Service como `tv-transcode.config.json` y editalo (la tabla de arriba, en inglés, explica cada opción). Por ejemplo, para una TV que sí decodifica AV1 y 4K: `{ "supportedCodecs": ["h264", "hevc", "vp9", "av1"], "maxWidth": 3840, "maxHeight": 2160 }`.
 
 **Cómo darte cuenta de que la TV no soporta un formato:** en Exo se escucha pero se ve negro, y en VLC o MPV la imagen se traba en un cuadro.
 
 ### Limitaciones
 - La que trabaja es **la PC**: necesita un procesador razonable.
 - Adelantar tarda unos segundos.
-- Los subtítulos van quemados en la imagen, así que no se pueden cambiar desde la TV.
+- Los subtítulos llegan por el addon como texto simple (`.srt`), así que se pierden los colores, las posiciones y los carteles de los subtítulos ASS. La primera vez que elegís uno puede tardar unos segundos, porque tiene que leer el archivo entero.
 - No es oficial: cada actualización de Stremio borra el enganche y hay que volver a ejecutar el instalador.
 
 ## License
