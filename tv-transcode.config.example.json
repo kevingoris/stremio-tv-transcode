@@ -1,0 +1,16 @@
+{
+  "supportedCodecs": ["h264", "hevc", "vp9", "mpeg2video", "mpeg4"],
+  "h264Allow10bit": false,
+  "maxWidth": 1920,
+  "maxHeight": 1088,
+  "outputWidth": 1280,
+  "videoBitrate": "2000k",
+  "audioBitrate": "128k",
+  "maxAudioTracks": 4,
+  "muxrate": 3000000,
+  "x264Preset": "veryfast",
+  "burnSubtitles": ["spa"],
+  "preferSubtitleTitle": "latin|lat\\b|419|latam",
+  "subtitlesWaitMs": 6000,
+  "serverPort": 11470
+}
