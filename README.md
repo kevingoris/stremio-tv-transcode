@@ -43,13 +43,51 @@ Remove it: `install.ps1 -Uninstall`. Turn it off temporarily: create an empty fi
 
 Other systems: the module also looks for `ffmpeg`/`ffprobe` in Linux paths, but the installer is Windows-only. To add the hook by hand, put the line that `install.ps1` inserts right before `EngineFS.emit("stream-open", ...)` inside `handleTorrent`.
 
+## Set it up for your TV
+
+**The defaults come from a TCL TV with a Realtek chip** (H.264 8-bit, HEVC, VP9, up to 1080p). Other TVs support different formats, so the best thing is to ask your own TV. The server can't figure it out by itself: when the TV requests a video, it doesn't say which formats it supports.
+
+### Option A — automatic, over ADB (recommended)
+
+1. **Turn on debugging on the TV:** Settings → Device Preferences → About → click **Build** 7 times. Then go to **Developer options** and turn on **USB debugging** (on some TVs it's also called *Network debugging* / *ADB over network*).
+2. **Find the TV's IP:** Settings → Network → your Wi-Fi network (e.g. `192.168.0.10`).
+3. **Download adb** ([Android platform-tools](https://developer.android.com/tools/releases/platform-tools)) and unzip it.
+4. Run:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File detect-tv-codecs.ps1 -TvIp 192.168.0.10 -Adb C:\path\to\platform-tools\adb.exe -OnlyThisTv
+   ```
+   The first time, **the TV shows a prompt to allow the PC**: accept it (and tick "always allow").
+5. The script reads the TV's decoder list (the `media_codecs*.xml` files Android itself uses), keeps **only the hardware ones**, shows you what it found and saves `tv-transcode.config.json` in the Stremio Service folder. With `-OnlyThisTv`, only that TV gets conversion and the other devices (phone, other TVs) keep getting the original file. Try `-DryRun` first if you just want to see it.
+6. Restart Stremio Service.
+
+Example output on the TCL TV:
+```
+Hardware decoders found on the TV:
+  h264        up to 1920x1088  (OMX.realtek.video.decoder)
+  hevc        up to 1920x1088  (OMX.realtek.video.decoder)
+  vp9         up to 1920x1088  (OMX.realtek.video.decoder)
+  ...
+```
+There's no `av1` in the list → AV1 videos get converted.
+
+### Option B — by hand
+
+Look up your TV's chip (on the spec sheet, or with an app like *AIDA64* or *Device Info HW* on the TV) and which formats it decodes. Then copy `tv-transcode.config.example.json` to the Stremio Service folder as `tv-transcode.config.json` and edit it. For example, a TV that does decode AV1 and 4K:
+```json
+{ "supportedCodecs": ["h264", "hevc", "vp9", "av1"], "maxWidth": 3840, "maxHeight": 2160 }
+```
+Any key you leave out uses its default. Restart Stremio Service after changing it.
+
+**How to tell if a format isn't supported:** with ExoPlayer you hear audio over a black screen, and with VLC/MPV the picture freezes on one frame. That format belongs **outside** `supportedCodecs`.
+
 ## Settings
 
-Copy `tv-transcode.config.example.json` to the Stremio Service folder as `tv-transcode.config.json` and edit it:
+All the keys in `tv-transcode.config.json`:
 
 | Key | What it does |
 |---|---|
-| `supportedCodecs` | Codecs your TV decodes in hardware. Anything else gets converted. |
+| `supportedCodecs` | Codecs your TV decodes in hardware (ffmpeg names: `h264`, `hevc`, `vp9`, `av1`, `mpeg2video`...). Anything else gets converted. |
+| `clients` | IPs of the devices that get conversion (`["192.168.0.10"]`). An empty array means every device on the network. |
 | `h264Allow10bit` | `true` if your TV handles 10-bit H.264. |
 | `maxWidth` / `maxHeight` | Maximum resolution your TV decodes. |
 | `outputWidth` | Output width (1280 = 720p, 1920 = 1080p, which uses more CPU). |
@@ -99,8 +137,24 @@ Cuando la TV pide un video, el server lo analiza. Si la TV lo puede reproducir, 
 
 Para sacarlo: `install.ps1 -Uninstall`. Para apagarlo un rato: creá un archivo vacío llamado `tv-transcode.off` en la carpeta de Stremio Service.
 
-### Configuración
-Copiá `tv-transcode.config.example.json` a la carpeta de Stremio Service con el nombre `tv-transcode.config.json` y cambiá lo que necesites. La tabla de arriba, en inglés, explica cada opción. Por ejemplo, `"burnSubtitles": ["eng"]` quema los subtítulos en inglés.
+### Configurarlo para tu TV
+**Los valores por defecto son los de una TV TCL con chip Realtek.** Tu TV puede soportar otros formatos, así que lo mejor es preguntárselo a ella. El server no lo puede saber solo: cuando la TV pide un video, no dice qué formatos soporta.
+
+**Automático, por ADB (recomendado):**
+1. En la TV: Configuración → Preferencias del dispositivo → Información → hacé clic 7 veces en **Compilación**. Después, en **Opciones de desarrollador**, activá **Depuración por USB** (o *Depuración por red*).
+2. Fijate la IP de la TV en Configuración → Red.
+3. Descargá [adb](https://developer.android.com/tools/releases/platform-tools) y descomprimilo.
+4. Ejecutá:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File detect-tv-codecs.ps1 -TvIp 192.168.0.10 -Adb C:\ruta\a\platform-tools\adb.exe -OnlyThisTv
+   ```
+   La primera vez, **la TV te pregunta si permitís la conexión de la PC**: aceptá.
+5. El script lee la lista de decodificadores de la TV, se queda **solo con los de hardware**, te muestra lo que encontró y guarda `tv-transcode.config.json`. Con `-OnlyThisTv`, solo esa TV recibe la conversión; el celular y los demás dispositivos reciben el archivo original. Con `-DryRun` te lo muestra sin guardar nada.
+6. Reiniciá Stremio Service.
+
+**A mano:** buscá qué chip tiene tu TV y qué formatos soporta, copiá `tv-transcode.config.example.json` a la carpeta de Stremio Service como `tv-transcode.config.json` y editalo (la tabla de arriba, en inglés, explica cada opción). Por ejemplo, `"burnSubtitles": ["eng"]` quema los subtítulos en inglés.
+
+**Cómo darte cuenta de que la TV no soporta un formato:** en Exo se escucha pero se ve negro, y en VLC o MPV la imagen se traba en un cuadro.
 
 ### Limitaciones
 - La que trabaja es **la PC**: necesita un procesador razonable.

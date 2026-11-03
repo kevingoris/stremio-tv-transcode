@@ -12,5 +12,6 @@
   "burnSubtitles": ["spa"],
   "preferSubtitleTitle": "latin|lat\\b|419|latam",
   "subtitlesWaitMs": 6000,
+  "clients": [],
   "serverPort": 11470
 }

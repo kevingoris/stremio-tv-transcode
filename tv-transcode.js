@@ -49,6 +49,8 @@ const DEFAULTS = {
     burnSubtitles: [ "spa" ], // ISO 639-2 language codes, in order of preference
     preferSubtitleTitle: "latin|lat\\b|419|latam",
     subtitlesWaitMs: 6000,
+    // Only these devices (IPs) get conversion. An empty array means every device on the LAN.
+    clients: [],
     // Local server port (ffmpeg reads the original file through it)
     serverPort: 11470
 };
@@ -264,7 +266,9 @@ function serve(req, res, key, inputUrl, info, subFile) {
 function maybeHandle(req, res, engine, fileIdx, fileName, cb) {
     try {
         if (fs.existsSync(OFF_FLAG)) return cb(false);
-        if (isLoopback(req.connection && req.connection.remoteAddress)) return cb(false);
+        const addr = req.connection && req.connection.remoteAddress;
+        if (isLoopback(addr)) return cb(false);
+        if ((config.clients || []).length && !config.clients.includes((addr || "").replace(/^::ffff:/, ""))) return cb(false);
         if (/[?&](notranscode|download)=/.test(req.url)) return cb(false);
         if (!VIDEO_EXT.test(fileName || "")) return cb(false);
     } catch (e) { return cb(false); }
