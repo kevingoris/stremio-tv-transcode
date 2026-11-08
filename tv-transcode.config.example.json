@@ -3,6 +3,7 @@
   "h264Allow10bit": false,
   "maxWidth": 1920,
   "maxHeight": 1088,
+  "maxBitrate": 0,
   "outputWidth": 1280,
   "videoBitrate": "2000k",
   "audioBitrate": "128k",

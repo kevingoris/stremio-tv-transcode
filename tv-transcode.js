@@ -39,6 +39,10 @@ const DEFAULTS = {
     h264Allow10bit: false,
     maxWidth: 1920,
     maxHeight: 1088,
+    // Files above this average bitrate (bits/s) also get converted, even in a
+    // supported codec: on a weak TV, Stremio's player can't keep up with
+    // heavy releases. 0 = no limit.
+    maxBitrate: 0,
     // Output
     outputWidth: 1280,        // 1280 = 720p. Use 1920 for 1080p panels (more CPU).
     videoBitrate: "2000k",
@@ -65,6 +69,7 @@ const VIDEO_EXT = /\.(mkv|mp4|m4v|webm|avi|mov|ts)$/i;
 const TEXT_SUBS = [ "ass", "ssa", "subrip", "srt", "webvtt", "mov_text" ];
 
 const probes = {};   // key -> Promise<info|null>
+let probesRunning = 0;
 const sessions = {}; // key -> Set<session>
 
 try { fs.mkdirSync(WORK_DIR, { recursive: true }); } catch (e) {}
@@ -83,8 +88,9 @@ function isLoopback(addr) {
     return !addr || addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
 }
 
-function needsTranscode(v) {
+function needsTranscode(v, bitrate) {
     if (!v) return false;
+    if (config.maxBitrate && bitrate > config.maxBitrate) return true;
     if (!config.supportedCodecs.includes(v.codec_name)) return true;
     if (v.codec_name === "h264" && !config.h264Allow10bit && /10|12/.test(v.pix_fmt || "")) return true;
     if ((v.width || 0) > config.maxWidth || (v.height || 0) > config.maxHeight) return true;
@@ -93,10 +99,12 @@ function needsTranscode(v) {
 
 function probe(key, inputUrl) {
     if (probes[key]) return probes[key];
+    probesRunning++;
     probes[key] = new Promise((resolve) => {
         execFile(FFPROBE, [ "-v", "error", "-show_entries",
-            "stream=index,codec_type,codec_name,pix_fmt,width,height:stream_tags=language,title:stream_disposition=default:format=duration",
+            "stream=index,codec_type,codec_name,pix_fmt,width,height:stream_tags=language,title:stream_disposition=default:format=duration,bit_rate",
             "-of", "json", inputUrl ], { timeout: 60000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+            probesRunning--;
             if (err) { log("probe failed " + key + ": " + err.message); delete probes[key]; return resolve(null); }
             try {
                 const j = JSON.parse(stdout);
@@ -105,9 +113,10 @@ function probe(key, inputUrl) {
                 const audio = streams.filter((s) => s.codec_type === "audio");
                 const subs = streams.filter((s) => s.codec_type === "subtitle" && TEXT_SUBS.includes(s.codec_name));
                 const duration = parseFloat(j.format && j.format.duration) || 0;
-                const info = { needs: needsTranscode(video) && duration > 0, video, audio: audio.slice(0, config.maxAudioTracks), subs, duration };
+                const bitrate = parseInt(j.format && j.format.bit_rate, 10) || 0;
+                const info = { needs: needsTranscode(video, bitrate) && duration > 0, video, audio: audio.slice(0, config.maxAudioTracks), subs, duration };
                 log("probe " + key + ": " + (video ? video.codec_name + " " + video.pix_fmt + " " + video.width + "x" + video.height : "no video")
-                    + " dur=" + duration + " transcode=" + info.needs + " subtitle tracks=" + subs.length);
+                    + " " + Math.round(bitrate / 1000) + "kbps dur=" + duration + " transcode=" + info.needs + " subtitle tracks=" + subs.length);
                 resolve(info);
             } catch (e) { log("probe parse " + key + ": " + e.message); delete probes[key]; resolve(null); }
         });
@@ -293,8 +302,19 @@ function handleRoute(req, res, next) {
     if (m) {
         const extra = {};
         (decodeURIComponent(m[1] || "")).split("&").forEach((kv) => { const i = kv.indexOf("="); if (i > 0) extra[kv.slice(0, i)] = kv.slice(i + 1); });
-        const c = findConverted(extra);
-        if (!c) return sendJson(res, 200, { subtitles: [] });
+        // Stremio asks for subtitles as playback starts, often before the probe
+        // has decided to convert; wait up to 20 s for it instead of answering empty.
+        const started = Date.now();
+        const answer = () => {
+            const c = findConverted(extra);
+            const waiting = probesRunning > 0 || Date.now() - started < 3000;
+            if (!c && waiting && Date.now() - started < 20000) return setTimeout(answer, 500);
+            if (!c) return sendJson(res, 200, { subtitles: [] });
+            sendSubs(c, extra);
+        };
+        return answer();
+    }
+    function sendSubs(c, extra) {
         extractAllSubs(c.key);
         const base = baseUrl(req);
         const subtitles = c.info.subs.map((s) => ({
@@ -310,17 +330,29 @@ function handleRoute(req, res, next) {
     if (m) {
         const key = m[1].toLowerCase() + "/" + m[2];
         const file = subFile(key, m[3]);
+        let sent = false;
+        const asked = Date.now();
         const send = () => {
+            if (sent) return;
+            sent = true;
             fs.readFile(file, (err, data) => {
-                if (err) { res.writeHead(404, { "Access-Control-Allow-Origin": "*" }); return res.end(); }
+                // Not finished: send what has been extracted so far (maybe nothing).
+                // A 404 makes Stremio pause playback and retry forever.
+                let partial = false;
+                if (err) { partial = true; try { data = fs.readFileSync(file + ".tmp.srt"); } catch (e) { data = Buffer.alloc(0); } }
+                log("srt " + key + " track " + m[3] + ": " + (partial ? "partial (" + data.length + " bytes)" : "complete") + " after " + (Date.now() - asked) + " ms");
                 res.writeHead(200, { "Content-Type": "application/x-subrip; charset=utf-8", "Access-Control-Allow-Origin": "*" });
                 res.end(data);
             });
         };
         if (fs.existsSync(file)) return send();
-        // Still extracting: wait (the torrent downloads fast).
+        // Still extracting: wait a little. Extraction needs the whole file, so on a
+        // torrent that is still downloading it can take minutes, and Stremio holds
+        // playback until the auto-selected subtitle loads. After 5 s send the part
+        // extracted so far; picking the subtitle again once the download finishes
+        // loads it whole.
         const job = extractAllSubs(key);
-        const timer = setTimeout(send, 120000);
+        const timer = setTimeout(send, 5000);
         return job.then(() => { clearTimeout(timer); send(); });
     }
     res.writeHead(404, { "Access-Control-Allow-Origin": "*" });

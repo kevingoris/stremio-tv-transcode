@@ -100,6 +100,7 @@ All the keys in `tv-transcode.config.json`:
 | `clients` | IPs of the devices that get conversion (`["192.168.0.10"]`). An empty array means every device on the network. |
 | `h264Allow10bit` | `true` if your TV handles 10-bit H.264. |
 | `maxWidth` / `maxHeight` | Maximum resolution your TV decodes. |
+| `maxBitrate` | Files above this average bitrate (bits/s) also get converted, even if the TV supports their format. Useful when the TV can decode heavy releases but Stremio's player stutters on them. E.g. `5000000` = 5 Mbit/s. `0` = no limit. |
 | `outputWidth` | Output width (1280 = 720p, 1920 = 1080p, which uses more CPU). |
 | `videoBitrate`, `audioBitrate`, `muxrate` | Output quality. `muxrate` has to be above video + all audio tracks. |
 
@@ -109,7 +110,7 @@ Log: `%TEMP%\stremio-transcode\tv-transcode.log`.
 
 - The **PC does the work**: it needs enough CPU (or you can lower `outputWidth`/`x264Preset`).
 - Seeking takes a few seconds (ffmpeg starts again from that point).
-- Subtitles reach Stremio through the addon, as plain text (`.srt`): ASS styling (colors, positions, signs) is lost. Image subtitles (PGS) aren't offered. The first time you pick a subtitle it can take a few seconds, because it has to read the whole file.
+- Subtitles reach Stremio through the addon, as plain text (`.srt`): ASS styling (colors, positions, signs) is lost. Image subtitles (PGS) aren't offered. The first time you pick a subtitle it can take a few seconds, because it has to read the whole file. While a torrent is still downloading, the subtitle comes in partial (only the part downloaded so far) so playback isn't held; pick it again once the download finishes to get it whole.
 - It isn't official: it depends on the internal structure of `server.js`, which can change between versions.
 
 ## For the Stremio team 💡
@@ -172,12 +173,14 @@ Para sacarlo: `install.ps1 -Uninstall`. Para apagarlo un rato: creá un archivo 
 
 **A mano:** buscá qué chip tiene tu TV y qué formatos soporta, copiá `tv-transcode.config.example.json` a la carpeta de Stremio Service como `tv-transcode.config.json` y editalo (la tabla de arriba, en inglés, explica cada opción). Por ejemplo, para una TV que sí decodifica AV1 y 4K: `{ "supportedCodecs": ["h264", "hevc", "vp9", "av1"], "maxWidth": 3840, "maxHeight": 2160 }`.
 
+**Opcional, videos pesados:** si tu TV reproduce un formato pero se traba con los archivos pesados, poné `maxBitrate` (en bits/s): los videos que lo superen también se convierten a 720p. Por ejemplo, `"maxBitrate": 5000000` = 5 Mbit/s. Viene desactivado (`0`).
+
 **Cómo darte cuenta de que la TV no soporta un formato:** en Exo se escucha pero se ve negro, y en VLC o MPV la imagen se traba en un cuadro.
 
 ### Limitaciones
 - La que trabaja es **la PC**: necesita un procesador razonable.
 - Adelantar tarda unos segundos.
-- Los subtítulos llegan por el addon como texto simple (`.srt`), así que se pierden los colores, las posiciones y los carteles de los subtítulos ASS. La primera vez que elegís uno puede tardar unos segundos, porque tiene que leer el archivo entero.
+- Los subtítulos llegan por el addon como texto simple (`.srt`), así que se pierden los colores, las posiciones y los carteles de los subtítulos ASS. La primera vez que elegís uno puede tardar unos segundos, porque tiene que leer el archivo entero. Si el torrent todavía se está descargando, el subtítulo llega incompleto (solo la parte ya descargada) para que el video no se quede esperando; cuando termine la descarga, volvé a elegirlo y carga entero.
 - No es oficial: cada actualización de Stremio borra el enganche y hay que volver a ejecutar el instalador.
 
 ## License
