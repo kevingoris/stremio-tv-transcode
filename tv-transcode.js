@@ -242,7 +242,7 @@ function extractAllSubs(key) {
     if (c.info.subs.every((s) => fs.existsSync(subFile(key, s.index)))) return allSubJobs[key] = Promise.resolve(true);
     allSubJobs[key] = new Promise((resolve) => {
         const args = [ "-hide_banner", "-loglevel", "error", "-y", "-i", c.inputUrl ];
-        c.info.subs.forEach((s) => args.push("-map", "0:" + s.index, "-c:s", "srt", subFile(key, s.index) + ".tmp.srt"));
+        c.info.subs.forEach((s) => args.push("-map", "0:" + s.index, "-c:s", "srt", "-flush_packets", "1", subFile(key, s.index) + ".tmp.srt"));
         const p = spawn(FFMPEG, args, { windowsHide: true });
         p.on("close", (code) => {
             c.info.subs.forEach((s) => { try { fs.renameSync(subFile(key, s.index) + ".tmp.srt", subFile(key, s.index)); } catch (e) {} });
@@ -320,7 +320,9 @@ function handleRoute(req, res, next) {
         const subtitles = c.info.subs.map((s) => ({
             id: "tvt-" + c.key + "-" + s.index,
             url: base + "/sub/" + c.key.replace("/", "-") + "-" + s.index + ".srt",
-            lang: (s.tags && s.tags.language) || "und"
+            lang: (s.tags && s.tags.language) || "und",
+            // Original track name, so you can tell where it came from.
+            label: ((s.tags && s.tags.title) ? s.tags.title + " · " : "") + "TV transcode"
         }));
         log("subtitles for " + c.key + ": " + subtitles.length + " tracks (extra " + JSON.stringify(extra) + ")");
         return sendJson(res, 200, { subtitles, cacheMaxAge: 0 });
@@ -339,7 +341,16 @@ function handleRoute(req, res, next) {
                 // Not finished: send what has been extracted so far (maybe nothing).
                 // A 404 makes Stremio pause playback and retry forever.
                 let partial = false;
-                if (err) { partial = true; try { data = fs.readFileSync(file + ".tmp.srt"); } catch (e) { data = Buffer.alloc(0); } }
+                if (err) {
+                    partial = true;
+                    let text = "";
+                    try { text = fs.readFileSync(file + ".tmp.srt", "utf8"); } catch (e) {}
+                    // Keep only whole cues; an empty file also counts as a failure for
+                    // Stremio, so fall back to a single blank, near-instant cue.
+                    const cut = Math.max(text.lastIndexOf("\n\n"), text.lastIndexOf("\r\n\r\n"));
+                    text = cut > 0 ? text.slice(0, cut) + "\n\n" : "1\n00:00:00,000 --> 00:00:00,010\n.\n\n";
+                    data = Buffer.from(text, "utf8");
+                }
                 log("srt " + key + " track " + m[3] + ": " + (partial ? "partial (" + data.length + " bytes)" : "complete") + " after " + (Date.now() - asked) + " ms");
                 res.writeHead(200, { "Content-Type": "application/x-subrip; charset=utf-8", "Access-Control-Allow-Origin": "*" });
                 res.end(data);
